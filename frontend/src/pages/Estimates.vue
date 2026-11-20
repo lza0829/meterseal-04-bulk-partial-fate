@@ -1,11 +1,13 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
+import BatchLoader from '../components/BatchLoader.vue'
 const periodId = ref('2026-10')
 const rows = ref([])
 const form = ref({ meter_id: 'M-W-101', period_id: '2026-10', qty: 10, doc_no: '' })
 const msg = ref('')
 const err = ref('')
+const example = '[\n  {"meter_id":"M-W-101","period_id":"2026-10","qty":12,"doc_no":"B-1"},\n  {"meter_id":"M-W-102","period_id":"2026-10","qty":15,"doc_no":"B-2"}\n]'
 async function load() {
   err.value = ''; msg.value = ''
   rows.value = await api.estimates(periodId.value)
@@ -52,5 +54,6 @@ onMounted(load)
         </tbody>
       </table>
     </div>
+    <BatchLoader kind="estimate" :example="example" :post-batch="api.postEstimateBatch" @loaded="load" />
   </div>
 </template>

@@ -1,18 +1,11 @@
 from __future__ import annotations
-import uuid
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.db import connect
-from app.services.gate import assert_period_writable
+from app.services.loader import load_batch
 
 router = APIRouter(tags=["readings"])
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 class EstimateIn(BaseModel):
@@ -29,6 +22,16 @@ class ActualIn(BaseModel):
     occurred_at: str
     reader_code: str = "R00"
     doc_no: str = Field(min_length=1)
+
+
+class EstimateBatchIn(BaseModel):
+    period_id: str | None = None
+    rows: list[dict] = Field(min_length=1)
+
+
+class ActualBatchIn(BaseModel):
+    period_id: str | None = None
+    rows: list[dict] = Field(min_length=1)
 
 
 @router.get("/estimates")
@@ -48,25 +51,20 @@ def list_estimates(period_id: str | None = None):
 
 @router.post("/estimates")
 def create_estimate(body: EstimateIn):
-    assert_period_writable(body.period_id)
-    conn = connect()
-    try:
-        mid = conn.execute("SELECT 1 FROM meters WHERE meter_id=?", (body.meter_id,)).fetchone()
-        if not mid:
-            raise HTTPException(404, "表具不存在")
-        eid = "E-" + uuid.uuid4().hex[:10]
-        try:
-            conn.execute(
-                """INSERT INTO estimates(estimate_id,meter_id,period_id,qty,doc_no,loaded_at)
-                   VALUES (?,?,?,?,?,?)""",
-                (eid, body.meter_id, body.period_id, body.qty, body.doc_no, _now()),
-            )
-            conn.commit()
-        except Exception as e:
-            raise HTTPException(409, f"估抄写入失败: {e}") from e
-        return {"estimate_id": eid, "ok": True}
-    finally:
-        conn.close()
+    # 单行也走统一装载服务，保证校验器/封印闸/回执口径只有一套
+    receipt = load_batch("estimate", [body.model_dump()], body.period_id)
+    if receipt["status"] == "success":
+        return {"estimate_id": receipt["loaded_ids"][0], "ok": True,
+                "receipt_id": receipt["receipt_id"]}
+    f = receipt["failures"][0]
+    code = f["reason_code"]
+    status = 409 if code == "PERIOD_SEALED" else (404 if code in ("METER_NOT_FOUND", "PERIOD_NOT_FOUND") else 400)
+    raise HTTPException(status, f"{f['reason_text']}（receipt={receipt['receipt_id']}）")
+
+
+@router.post("/estimates/batch")
+def create_estimate_batch(body: EstimateBatchIn):
+    return load_batch("estimate", body.rows, body.period_id)
 
 
 @router.get("/actuals")
@@ -86,31 +84,52 @@ def list_actuals(period_id: str | None = None):
 
 @router.post("/actuals")
 def create_actual(body: ActualIn):
-    assert_period_writable(body.period_id)
+    receipt = load_batch("actual", [body.model_dump()], body.period_id)
+    if receipt["status"] == "success":
+        return {"actual_id": receipt["loaded_ids"][0], "ok": True,
+                "receipt_id": receipt["receipt_id"]}
+    f = receipt["failures"][0]
+    code = f["reason_code"]
+    status = 409 if code == "PERIOD_SEALED" else (404 if code in ("METER_NOT_FOUND", "PERIOD_NOT_FOUND") else 400)
+    raise HTTPException(status, f"{f['reason_text']}（receipt={receipt['receipt_id']}）")
+
+
+@router.post("/actuals/batch")
+def create_actual_batch(body: ActualBatchIn):
+    return load_batch("actual", body.rows, body.period_id)
+
+
+@router.get("/quarantine")
+def list_quarantine(period_id: str | None = None, receipt_id: str | None = None):
     conn = connect()
     try:
-        mid = conn.execute("SELECT 1 FROM meters WHERE meter_id=?", (body.meter_id,)).fetchone()
-        if not mid:
-            raise HTTPException(404, "表具不存在")
-        aid = "A-" + uuid.uuid4().hex[:10]
-        try:
-            conn.execute(
-                """INSERT INTO actuals(actual_id,meter_id,period_id,qty,occurred_at,reader_code,doc_no,loaded_at)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (
-                    aid,
-                    body.meter_id,
-                    body.period_id,
-                    body.qty,
-                    body.occurred_at,
-                    body.reader_code,
-                    body.doc_no,
-                    _now(),
-                ),
-            )
-            conn.commit()
-        except Exception as e:
-            raise HTTPException(409, f"实抄写入失败: {e}") from e
-        return {"actual_id": aid, "ok": True}
+        sql = "SELECT * FROM load_quarantine WHERE 1=1"
+        params: list = []
+        if period_id:
+            sql += " AND period_id=?"
+            params.append(period_id)
+        if receipt_id:
+            sql += " AND receipt_id=?"
+            params.append(receipt_id)
+        sql += " ORDER BY created_at DESC, row_index"
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    finally:
+        conn.close()
+
+
+@router.get("/receipts")
+def list_receipts(period_id: str | None = None):
+    conn = connect()
+    try:
+        if period_id:
+            rows = conn.execute(
+                "SELECT * FROM load_receipts WHERE period_id=? ORDER BY created_at DESC",
+                (period_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM load_receipts ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()

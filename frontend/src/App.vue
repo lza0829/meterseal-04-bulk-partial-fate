@@ -11,6 +11,7 @@
         <router-link to="/meters">表具</router-link>
         <router-link to="/estimates">估抄</router-link>
         <router-link to="/actuals">实抄</router-link>
+        <router-link to="/quarantine">隔离/回执</router-link>
         <router-link to="/reconcile">对齐差额</router-link>
         <router-link to="/seal">账期封印</router-link>
         <router-link to="/settings">设置</router-link>

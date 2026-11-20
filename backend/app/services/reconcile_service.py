@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 
 from app.db import connect
-from app.services.gate import assert_period_writable
 
 
 def _now() -> str:
@@ -14,9 +13,22 @@ def _now() -> str:
 
 
 def run_align(period_id: str) -> dict:
-    assert_period_writable(period_id)
     conn = connect()
     try:
+        # 拿写锁后在事务内复查账期状态，与装载/封印事务互斥，消除 TOCTOU
+        conn.execute("BEGIN IMMEDIATE")
+        period = conn.execute(
+            "SELECT status FROM periods WHERE period_id=?", (period_id,)
+        ).fetchone()
+        if not period:
+            conn.rollback()
+            raise HTTPException(404, f"账期不存在: {period_id}")
+        if period["status"] == "sealed":
+            conn.rollback()
+            raise HTTPException(409, f"账期已封印，禁止对齐: {period_id}")
+
+        # 对齐只吃正式表 estimates/actuals；load_quarantine 的行从未进正式表，
+        # 因此隔离行不可能出现在 matched / variances 中（split 架构的硬边界）。
         est = {
             r["meter_id"]: r
             for r in conn.execute(
@@ -31,6 +43,7 @@ def run_align(period_id: str) -> dict:
         }
         keys = sorted(set(est) | set(act))
         if not keys:
+            conn.rollback()
             raise HTTPException(400, "该账期无估抄/实抄可对齐")
 
         # expire prior open batches for period
@@ -84,6 +97,11 @@ def run_align(period_id: str) -> dict:
             "fingerprint": fingerprint,
             "status": "open",
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(500, f"对齐事务异常已回滚: {e}") from e
     finally:
         conn.close()
 
@@ -91,12 +109,16 @@ def run_align(period_id: str) -> dict:
 def seal_period(period_id: str, batch_id: str | None = None) -> dict:
     conn = connect()
     try:
+        # 拿写锁后在事务内复查账期状态，与装载事务互斥
+        conn.execute("BEGIN IMMEDIATE")
         period = conn.execute(
             "SELECT * FROM periods WHERE period_id=?", (period_id,)
         ).fetchone()
         if not period:
+            conn.rollback()
             raise HTTPException(404, "账期不存在")
         if period["status"] == "sealed":
+            conn.rollback()
             raise HTTPException(409, "账期已封印")
 
         if batch_id:
@@ -104,8 +126,10 @@ def seal_period(period_id: str, batch_id: str | None = None) -> dict:
                 "SELECT * FROM reconcile_batches WHERE batch_id=?", (batch_id,)
             ).fetchone()
             if not batch or batch["period_id"] != period_id:
+                conn.rollback()
                 raise HTTPException(400, "对账批与账期不匹配")
             if batch["status"] not in ("open",):
+                conn.rollback()
                 raise HTTPException(409, "对账批不可用")
         else:
             batch = conn.execute(
@@ -114,6 +138,7 @@ def seal_period(period_id: str, batch_id: str | None = None) -> dict:
                 (period_id,),
             ).fetchone()
             if not batch:
+                conn.rollback()
                 raise HTTPException(400, "无 open 对账批，请先对齐")
             batch_id = batch["batch_id"]
 
@@ -139,6 +164,11 @@ def seal_period(period_id: str, batch_id: str | None = None) -> dict:
             "pending_left": pending,
             "status": "sealed",
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(500, f"封印事务异常已回滚: {e}") from e
     finally:
         conn.close()
 

@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
+import BatchLoader from '../components/BatchLoader.vue'
 const periodId = ref('2026-10')
 const rows = ref([])
 const form = ref({
@@ -9,6 +10,7 @@ const form = ref({
 })
 const msg = ref('')
 const err = ref('')
+const example = '[\n  {"meter_id":"M-W-101","period_id":"2026-10","qty":12,"occurred_at":"2026-10-28T10:00:00","reader_code":"R01","doc_no":"BA-1"}\n]'
 async function load() {
   err.value = ''; msg.value = ''
   rows.value = await api.actuals(periodId.value)
@@ -58,5 +60,6 @@ onMounted(load)
         </tbody>
       </table>
     </div>
+    <BatchLoader kind="actual" :example="example" :post-batch="api.postActualBatch" @loaded="load" />
   </div>
 </template>

@@ -22,6 +22,14 @@ export const api = {
   actuals: (periodId) => req('/actuals' + (periodId ? `?period_id=${periodId}` : '')),
   postEstimate: (body) => req('/estimates', { method: 'POST', body: JSON.stringify(body) }),
   postActual: (body) => req('/actuals', { method: 'POST', body: JSON.stringify(body) }),
+  postEstimateBatch: (body) => req('/estimates/batch', { method: 'POST', body: JSON.stringify(body) }),
+  postActualBatch: (body) => req('/actuals/batch', { method: 'POST', body: JSON.stringify(body) }),
+  quarantine: (q) => {
+    const sp = new URLSearchParams(q || {})
+    const s = sp.toString()
+    return req('/quarantine' + (s ? `?${s}` : ''))
+  },
+  receipts: (periodId) => req('/receipts' + (periodId ? `?period_id=${periodId}` : '')),
   periods: () => req('/periods'),
   align: (period_id) => req('/align', { method: 'POST', body: JSON.stringify({ period_id }) }),
   batches: (periodId) => req('/batches' + (periodId ? `?period_id=${periodId}` : '')),

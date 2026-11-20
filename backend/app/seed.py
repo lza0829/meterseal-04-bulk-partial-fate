@@ -58,15 +58,80 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS load_receipts (
+  receipt_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  period_id TEXT NOT NULL,
+  load_mode TEXT NOT NULL,
+  status TEXT NOT NULL,
+  total_count INTEGER NOT NULL,
+  success_count INTEGER NOT NULL,
+  fail_count INTEGER NOT NULL,
+  reason_codes TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS load_quarantine (
+  quarantine_id TEXT PRIMARY KEY,
+  receipt_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  period_id TEXT NOT NULL,
+  meter_id TEXT,
+  doc_no TEXT,
+  row_index INTEGER NOT NULL,
+  reason_code TEXT NOT NULL,
+  reason_text TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_quarantine_receipt ON load_quarantine(receipt_id);
+CREATE INDEX IF NOT EXISTS idx_quarantine_period ON load_quarantine(period_id);
 """
+
+# 已存在的旧库补建增量对象（CREATE TABLE IF NOT EXISTS 本身幂等，这里保持显式入口）
+MIGRATIONS = [
+    """CREATE TABLE IF NOT EXISTS load_receipts (
+  receipt_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  period_id TEXT NOT NULL,
+  load_mode TEXT NOT NULL,
+  status TEXT NOT NULL,
+  total_count INTEGER NOT NULL,
+  success_count INTEGER NOT NULL,
+  fail_count INTEGER NOT NULL,
+  reason_codes TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)""",
+    """CREATE TABLE IF NOT EXISTS load_quarantine (
+  quarantine_id TEXT PRIMARY KEY,
+  receipt_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  period_id TEXT NOT NULL,
+  meter_id TEXT,
+  doc_no TEXT,
+  row_index INTEGER NOT NULL,
+  reason_code TEXT NOT NULL,
+  reason_text TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_quarantine_receipt ON load_quarantine(receipt_id)",
+    "CREATE INDEX IF NOT EXISTS idx_quarantine_period ON load_quarantine(period_id)",
+]
 
 
 def seed_if_empty() -> None:
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        for stmt in MIGRATIONS:
+            conn.execute(stmt)
         n = conn.execute("SELECT COUNT(*) AS c FROM meters").fetchone()["c"]
         if n:
+            # 既有库：确保架构开关存在，缺省 atomic
+            conn.execute(
+                "INSERT OR IGNORE INTO settings(key,value) VALUES ('load_mode','atomic')"
+            )
+            conn.commit()
             return
         meters = [
             ("M-W-101", "A栋", "101", "water"),
@@ -117,6 +182,10 @@ def seed_if_empty() -> None:
         )
         conn.execute(
             "INSERT INTO settings(key,value) VALUES ('product_title','抄表簿')"
+        )
+        # 全局唯一装载架构：atomic=整批原子回滚；split=成功行落库/失败行进隔离
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES ('load_mode','atomic')"
         )
         # 界面不露英文：表类型仍存 water/electric 码，前端映射为中文
         conn.commit()
